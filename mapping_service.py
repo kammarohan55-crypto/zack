@@ -12,7 +12,7 @@ from fhir.resources.dosage import Dosage
 from fhir.resources.procedure import Procedure
 from fhir.resources.encounter import Encounter
 from fhir.resources.quantity import Quantity
-from harmon_service.terminology import get_condition_code, get_loinc_code, get_rxnorm_code
+from terminology import get_condition_code, get_loinc_code, get_rxnorm_code
 
 logger = logging.getLogger(__name__)
 
@@ -301,25 +301,34 @@ class MappingService:
                     id=str(uuid.uuid4()),
                     subject={"reference": f"Patient/{patient.id}"},
                     status="finished",
-                    class_fhir={
-                        "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
-                        "code": "IMP",
-                        "display": "inpatient encounter"
-                    }
+                    # R5 expects List[CodeableConcept] for class
+                    class_fhir=[{
+                        "coding": [{
+                            "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                            "code": "IMP",
+                            "display": "inpatient encounter"
+                        }]
+                    }]
                 )
                 
                 # Set period
+                # R5 uses actualPeriod
                 if admission_date or discharge_date:
                     period_dict = {}
                     if admission_date:
                         period_dict["start"] = admission_date
                     if discharge_date:
                         period_dict["end"] = discharge_date
-                    encounter.period = period_dict
+                    encounter.actualPeriod = period_dict
                 
                 # Set admission reason
+                # R5 uses reason (List[EncounterReason])
                 if admission_reason:
-                    encounter.reasonCode = [CodeableConcept.model_construct(text=admission_reason)]
+                    encounter.reason = [{
+                        "value": [{
+                            "concept": {"text": admission_reason}
+                        }]
+                    }]
                 
                 bundle_entries.append(BundleEntry(resource=encounter, request={'method': 'POST', 'url': 'Encounter'}))
 

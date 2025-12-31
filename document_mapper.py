@@ -65,7 +65,9 @@ class DocumentMapper:
         # Set patient ID
         patient_id = pii.get('ID') or pii.get('id')
         if patient_id:
-            self.patient_id = str(patient_id)
+            # Sanitize ID to match FHIR format: [A-Za-z0-9\-\.]{1,64}
+            # Replace underscores with hyphens
+            self.patient_id = str(patient_id).replace('_', '-')
             patient.id = self.patient_id
         else:
             # Generate UUID if no ID provided
@@ -153,16 +155,25 @@ class DocumentMapper:
         }
         
         # Prepare concept with RxNorm lookup
+        concept = None
         try:
             concept_data = get_rxnorm_code(medication)
-            med_data["medicationCodeableConcept"] = CodeableConcept.model_construct(**concept_data)
+            concept = CodeableConcept.model_construct(**concept_data)
         except Exception:
             # Fallback
-            med_data["medicationCodeableConcept"] = CodeableConcept.model_construct(text=medication)
+            concept = CodeableConcept.model_construct(text=medication)
 
-        # Note: Depending on fhir.resources version, it might be 'medicationCodeableConcept' (R4) 
-        # or 'medication' (CodeableReference in R5, but we targeted R4).
-        # We'll use medicationCodeableConcept as per standard R4.
+        # Handle Reference/Concept choice
+        # Error indicates 'medication' field is required.
+        # Valid structure for modern fhir.resources (R5) is medication.concept
+        # For R4 it is medicationCodeableConcept.
+        # We will try to provide 'medication' property with 'concept' which is R5 compliant
+        # and satisfies "medication field required".
+        
+        # Convert concept to dict if possible or use object
+        concept_dict = concept.model_dump(exclude_none=True) if hasattr(concept, 'model_dump') else concept.dict(exclude_none=True)
+        
+        med_data["medication"] = {"concept": concept_dict}
         
         # Add dosage if provided
         if dosage_text:
@@ -181,22 +192,18 @@ class DocumentMapper:
             procedure_name: Name of the procedure
             date: Optional procedure date
         """
-        procedure = Procedure.model_construct()
-        procedure.id = str(uuid.uuid4())
-        
-        # Reference patient
-        procedure.subject = {"reference": f"Patient/{self.patient_id}"}
-        
-        # Set procedure code
-        procedure.code = CodeableConcept.model_construct()
-        procedure.code.text = procedure_name
-        
-        # Status: completed (assuming past procedure)
-        procedure.status = "completed"
+        proc_data = {
+            "id": str(uuid.uuid4()),
+            "subject": {"reference": f"Patient/{self.patient_id}"},
+            "status": "completed",  # Required field
+            "code": {"text": procedure_name}
+        }
         
         # Set performed date if available
         if date:
-            procedure.performedDateTime = self._normalize_date(date)
+            proc_data["performedDateTime"] = self._normalize_date(date)
+            
+        procedure = Procedure.model_construct(**proc_data)
         
         return procedure
     
@@ -269,40 +276,47 @@ class DocumentMapper:
             outcome: Discharge outcome
             instructions: Discharge instructions
         """
-        encounter = Encounter.model_construct()
-        encounter.id = str(uuid.uuid4())
-        
-        # Reference patient
-        encounter.subject = {"reference": f"Patient/{self.patient_id}"}
-        
-        # Status: finished (assuming completed encounter)
-        encounter.status = "finished"
+        encounter = Encounter.model_construct(
+            id=str(uuid.uuid4()),
+            subject={"reference": f"Patient/{self.patient_id}"},
+            status="finished"
+        )
         
         # Class: inpatient
-        encounter.class_fhir = {
-            "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
-            "code": "IMP",
-            "display": "inpatient encounter"
-        }
+        # Validation requires list for class_fhir, likely expects CodeableConcept (R5)
+        encounter.class_fhir = [{
+            "coding": [{
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                "code": "IMP",
+                "display": "inpatient encounter"
+            }]
+        }]
         
         # Set period (admission to discharge) using dict structure
+        # R5 uses actualPeriod instead of period
         if admission_date or discharge_date:
             period_dict = {}
             if admission_date:
                 period_dict["start"] = self._normalize_date(admission_date)
             if discharge_date:
                 period_dict["end"] = self._normalize_date(discharge_date)
-            encounter.period = period_dict
+            encounter.actualPeriod = period_dict
         
         # Set admission reason
+        # R5 uses reason (List[EncounterReason]) instead of reasonCode
         if admission_reason:
-            encounter.reasonCode = [CodeableConcept.model_construct()]
-            encounter.reasonCode[0].text = admission_reason
+            encounter.reason = [{
+                "value": [{
+                    "concept": {"text": admission_reason}
+                }]
+            }]
         
         # Set service type (department)
+        # R5 serviceType is List[CodeableReference]
         if department:
-            encounter.serviceType = CodeableConcept.model_construct()
-            encounter.serviceType.text = department
+            encounter.serviceType = [{
+                "concept": {"text": department}
+            }]
         
         # Set hospitalization details using dict structure
         if outcome or instructions:
@@ -316,7 +330,8 @@ class DocumentMapper:
             if disposition_text:
                 discharge_disp = CodeableConcept.model_construct()
                 discharge_disp.text = " | ".join(disposition_text)
-                encounter.hospitalization = {
+                # R5 uses admission instead of hospitalization
+                encounter.admission = {
                     "dischargeDisposition": discharge_disp
                 }
         
@@ -345,30 +360,49 @@ class DocumentMapper:
     
     def _normalize_date(self, date_str: str) -> str:
         """
-        Normalize date to ISO-8601 format.
-        Handles various input formats.
+        Normalize date to ISO-8601 format (YYYY-MM-DD).
+        Handles various input formats including natural language dates.
         """
         if not date_str:
             return None
         
-        # Already ISO-8601 format
-        if 'T' in date_str or len(date_str) == 10:
-            return date_str
+        # Already ISO-8601 format (YYYY-MM-DD or YYYY-MM-DDThh:mm:ss)
+        # Check specifically for date-like structure to avoid matching tokens like 'TKN_...'
+        if len(date_str) >= 10 and date_str[4] == '-' and date_str[7] == '-':
+             if 'T' in date_str:
+                 return date_str.split('T')[0]
+             return date_str[:10]
+             
+        # Clean the string
+        cleaned_date = date_str.strip().replace(" ,", ",").replace(", ", ", ")
         
-        # Try to parse and convert common formats
-        try:
-            # Try common formats
-            for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y']:
-                try:
-                    dt = datetime.strptime(date_str, fmt)
-                    return dt.strftime('%Y-%m-%d')
-                except ValueError:
-                    continue
-        except Exception as e:
-            logger.warning(f"Could not parse date {date_str}: {e}")
-        
-        # Return as-is if parsing fails
-        return date_str
+        formats_to_try = [
+            '%Y-%m-%d', 
+            '%d/%m/%Y', 
+            '%m/%d/%Y', 
+            '%d-%m-%Y',
+            '%B %d, %Y',   # December 27, 2025
+            '%B %d %Y',    # December 27 2025
+            '%b %d, %Y',   # Dec 27, 2025
+            '%d %B %Y',    # 27 December 2025
+            '%Y/%m/%d'
+        ]
+
+        for fmt in formats_to_try:
+            try:
+                dt = datetime.strptime(cleaned_date, fmt)
+                return dt.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+                
+        # If parsing fails or it's a token (start with TKN), return None
+        # Returning empty string causes validation errors
+        if 'TKN' in date_str:
+            logger.info(f"Ignored tokenized date: {date_str}")
+            return None
+            
+        logger.warning(f"Could not parse date '{date_str}', returning None to avoid validation errors.")
+        return None
 
 
 class MedicalReportMapper(DocumentMapper):
