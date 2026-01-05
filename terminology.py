@@ -28,50 +28,61 @@ def get_condition_code(text):
                   "text": "Hypertension"
               }
     """
-    if not text:
-        return {"text": ""}
-
-    base_url = "https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search"
+    # Strategy 1: Exact search
     clean_text = text.strip()
+    result = _search_icd10(clean_text)
+    if result:
+        return result
 
-    try:
-        # API requires 'sf' parameter for suggestions, 'terms' for input
-        # Query params: terms=InputText, sf=code,name (search fields), df=code,name (display fields)
-        # Using a simple generic search
-        response = requests.get(
-            base_url,
-            params={"terms": clean_text, "sf": "code,name", "df": "code,name"},
-            timeout=5
-        )
-        response.raise_for_status()
-        data = response.json()
-        
-        # API response format: [total_count, codes, extra_info, display_strings]
-        # We need data[3] which contains the list of [code, name] pairs
-        if len(data) > 3 and data[3]:
-            # Take the first match
-            first_match = data[3][0]
-            code = first_match[0]
-            display = first_match[1]
-            
-            return {
-                "coding": [{
-                    "system": "http://hl7.org/fhir/sid/icd-10-cm",
-                    "code": code,
-                    "display": display
-                }],
-                "text": clean_text
-            }
-            
-    except Exception as e:
-        logger.warning(f"Terminology service failed for '{clean_text}': {e}")
-        # Proceed to fallback below
+    # Strategy 2: Last word (often the noun, e.g. "High Fever" -> "Fever")
+    words = clean_text.split()
+    if len(words) > 1:
+        last_word = words[-1]
+        # Ignore short words to avoid noise
+        if len(last_word) > 2:
+            result = _search_icd10(last_word)
+            if result:
+                return result
 
+    # Strategy 3: Longest word (e.g. "Acute Bronchitis" -> "Bronchitis")
+    if len(words) > 1:
+        longest_word = max(words, key=len)
+        if len(longest_word) > 2 and longest_word != words[-1]: # Don't repeat Strategy 2
+            result = _search_icd10(longest_word)
+            if result:
+                return result
 
     # Fallback: Just return text
     return {
         "text": clean_text
     }
+
+def _search_icd10(term):
+    """Helper to query ICD-10 API"""
+    base_url = "https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search"
+    try:
+        response = requests.get(
+            base_url,
+            params={"terms": term, "sf": "code,name", "df": "code,name", "maxList": 1},
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            if len(data) > 3 and data[3]:
+                first_match = data[3][0]
+                return {
+                    "coding": [{
+                        "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                        "code": first_match[0],
+                        "display": first_match[1]
+                    }],
+                    "text": term # Use the successful search term or keep original? Keeping original context is hard here, using matched term desc is safer.
+                    # Actually, we should return the mapped code but maybe imply the text is related.
+                    # Let's simple return the coding.
+                }
+    except Exception as e:
+        logger.warning(f"ICD-10 search failed for '{term}': {e}")
+    return None
 
 @cached(cache=terminology_cache)
 def get_loinc_code(text):

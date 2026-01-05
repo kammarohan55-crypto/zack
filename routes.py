@@ -1,5 +1,4 @@
 from flask import Blueprint, request, jsonify
-from mapping_service import MappingService
 from harmonization_service import HarmonizationService
 from document_mapper import get_document_mapper
 import logging
@@ -11,38 +10,6 @@ logger = logging.getLogger(__name__)
 @main_bp.route('/health', methods=['GET'])
 def health_check():
     return jsonify({'status': 'healthy', 'service': 'fhir-harmonization-service'}), 200
-
-@main_bp.route('/map', methods=['POST'])
-def map_data():
-    """
-    Accepts legacy JSON, returns FHIR Bundle.
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-        
-        logger.info(f"[/map] Received data: {json.dumps(data, indent=2)}")
-            
-        fhir_bundle = MappingService.map_legacy_to_fhir(data)
-        # Parse back to dict for JSON response
-        bundle_dict = json.loads(fhir_bundle)
-        
-        logger.info(f"[/map] Created bundle with {len(bundle_dict.get('entry', []))} entries")
-        for i, entry in enumerate(bundle_dict.get('entry', [])):
-            resource_type = entry.get('resource', {}).get('resourceType', 'Unknown')
-            logger.info(f"[/map] Entry {i}: {resource_type}")
-        
-        return jsonify(bundle_dict), 200
-        
-    except ValueError as e:
-        logger.error(f"ValueError in /map: {e}")
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        logger.error(f"Unexpected error in /map: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': 'Internal server error'}), 500
 
 @main_bp.route('/harmonize', methods=['POST'])
 def harmonize_data():

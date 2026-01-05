@@ -92,6 +92,19 @@ class DocumentMapper:
         dob = pii.get('DOB') or pii.get('dob')
         if dob:
             patient.birthDate = self._normalize_date(dob)
+
+        # Set gender
+        gender_raw = pii.get('Gender') or pii.get('gender')
+        if gender_raw:
+            g = gender_raw.lower().strip()
+            if g in ['m', 'male', 'man']:
+                patient.gender = 'male'
+            elif g in ['f', 'female', 'woman']:
+                patient.gender = 'female'
+            elif g in ['o', 'other']:
+                patient.gender = 'other'
+            else:
+                patient.gender = 'unknown'
         
         return patient
     
@@ -304,12 +317,30 @@ class DocumentMapper:
         
         # Set admission reason
         # R5 uses reason (List[EncounterReason]) instead of reasonCode
+        # Set admission reason
+        # R5 uses reason (List[EncounterReason]) instead of reasonCode
         if admission_reason:
-            encounter.reason = [{
-                "value": [{
-                    "concept": {"text": admission_reason}
-                }]
-            }]
+            encounter_reasons = []
+            # Split by comma to handle multiple reasons
+            reasons = [r.strip() for r in admission_reason.split(',') if r.strip()]
+            
+            for r_text in reasons:
+                # Default to text only
+                concept_data = {"text": r_text}
+                try:
+                    # Attempt terminology lookup (ICD-10)
+                    concept_data = get_condition_code(r_text)
+                except Exception as e:
+                    logger.warning(f"Reason terminology lookup failed for '{r_text}': {e}")
+                
+                # Construct R5 EncounterReason
+                encounter_reasons.append({
+                    "value": [{
+                        "concept": concept_data
+                    }]
+                })
+            
+            encounter.reason = encounter_reasons
         
         # Set service type (department)
         # R5 serviceType is List[CodeableReference]
