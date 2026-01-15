@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 from fhir.resources.bundle import Bundle, BundleEntry, BundleEntryRequest
 from fhir.resources.patient import Patient
+from fhir.resources.identifier import Identifier
 from fhir.resources.humanname import HumanName
 from fhir.resources.condition import Condition
 from fhir.resources.codeableconcept import CodeableConcept
@@ -76,6 +77,7 @@ class DocumentMapper:
         
         # Parse name
         name_str = pii.get('Name') or pii.get('name')
+        print(name_str)
         if name_str:
             name = HumanName.model_construct()
             name_parts = name_str.strip().split()
@@ -91,8 +93,18 @@ class DocumentMapper:
         # Set birth date (ISO-8601 format)
         dob = pii.get('DOB') or pii.get('dob')
         if dob:
-            patient.birthDate = self._normalize_date(dob)
-
+            normalized_dob = self._normalize_date(dob)
+            if normalized_dob:
+                patient.birthDate = normalized_dob
+            elif 'tkn' in str(dob).lower():
+                # Store token in identifier since it's not a valid date
+                token_identifier = Identifier.model_construct()
+                token_identifier.system = "http://privacy.service/dob-token"
+                token_identifier.value = dob
+                if not patient.identifier:
+                    patient.identifier = []
+                patient.identifier.append(token_identifier)
+        
         # Set gender
         gender_raw = pii.get('Gender') or pii.get('gender')
         if gender_raw:
@@ -428,7 +440,7 @@ class DocumentMapper:
                 
         # If parsing fails or it's a token (start with TKN), return None
         # Returning empty string causes validation errors
-        if 'TKN' in date_str:
+        if 'tkn' in date_str.lower():
             logger.info(f"Ignored tokenized date: {date_str}")
             return None
             
