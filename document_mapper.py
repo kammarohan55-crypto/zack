@@ -76,19 +76,32 @@ class DocumentMapper:
             patient.id = self.patient_id
         
         # Parse name
-        name_str = pii.get('Name') or pii.get('name')
-        print(name_str)
-        if name_str:
-            name = HumanName.model_construct()
-            name_parts = name_str.strip().split()
-            if len(name_parts) >= 2:
-                name.given = name_parts[:-1]
-                name.family = name_parts[-1]
-            elif len(name_parts) == 1:
-                name.family = name_parts[0]
-            else:
-                name.text = name_str
-            patient.name = [name]
+        given_name = pii.get('GivenName') or pii.get('givenname')
+        family_name = pii.get('FamilyName') or pii.get('familyname')
+        
+        name = HumanName.model_construct()
+        
+        if given_name or family_name:
+             if family_name:
+                 name.family = family_name
+             if given_name:
+                 # given is a list in FHIR
+                 name.given = [given_name]
+             patient.name = [name]
+        else:
+             # Fallback to legacy Name field
+            name_str = pii.get('Name') or pii.get('name')
+            print(name_str)
+            if name_str:
+                name_parts = name_str.strip().split()
+                if len(name_parts) >= 2:
+                    name.given = name_parts[:-1]
+                    name.family = name_parts[-1]
+                elif len(name_parts) == 1:
+                    name.family = name_parts[0]
+                else:
+                    name.text = name_str
+                patient.name = [name]
         
         # Set birth date (ISO-8601 format)
         dob = pii.get('DOB') or pii.get('dob')
